@@ -31,7 +31,6 @@ import cv2
 
 import torchaudio
 import torchaudio.transforms as T
-from torchaudio.transforms import Resample
 import librosa
 
 import torch
@@ -45,8 +44,9 @@ import torchvision.models as models
 
 from sklearn.metrics import f1_score
 
-#pip install transformers
-#pip install scikit-multilearn
+#!pip install wandb
+#!pip install scikit-multilearn
+import wandb
 from skmultilearn.model_selection import iterative_train_test_split
 
 # %% [markdown]
@@ -120,7 +120,7 @@ def visualize_intermediates(intermediates, sample_rate=44100, hop_length=196):
 
 # %%
 class AudioPreprocessing(nn.Module):
-    def __init__(self, debug=DEBUG, sample_rate=16000, n_fft=1024, win_length=1024, hop_length=196, augment=False):
+    def __init__(self, debug=DEBUG, sample_rate=44100, n_fft=1024, win_length=1024, hop_length=196, augment=False):
         super().__init__()
         self.debug = debug
         self.augment = augment
@@ -137,10 +137,14 @@ class AudioPreprocessing(nn.Module):
         img = cv2.medianBlur(img.astype(np.float32), 5)
         return torch.tensor(img, device=spectrogram.device).float().unsqueeze(0)
 
-    def binary_image_creation(self, spectrogram, threshold=1.5):
-        freq_median = torch.median(spectrogram, dim=2, keepdim=True).values
-        time_median = torch.median(spectrogram, dim=1, keepdim=True).values
-        mask = (spectrogram > threshold * freq_median) & (spectrogram > threshold * time_median)
+    def binary_image_creation(self, spectrogram, percentile=75):
+        # Calculate the percentile value instead of median for each frequency band
+        freq_thresholds = torch.quantile(spectrogram, percentile / 100.0, dim=2, keepdim=True)
+        # Calculate the percentile value for each time frame
+        time_thresholds = torch.quantile(spectrogram, percentile / 100.0, dim=1, keepdim=True)
+
+        # Create a mask based on the adaptive thresholding
+        mask = (spectrogram > freq_thresholds) & (spectrogram > time_thresholds)
         return mask.float()
 
     ## fastNlMeansDenoising works better but is too much cpu expensive and it bottlenecks the GPU on training
@@ -205,14 +209,7 @@ class AudioPreprocessing(nn.Module):
             waveform = self.random_time_shift(waveform)
             waveform = self.random_pitch_shift(waveform)
             waveform = self.random_volume_gain(waveform)
-            # waveform = self.random_noise_injection(waveform)
-
-        # Resampling to the target sample rate
-        waveform = self.resampler(waveform)
-
-        # Convert stereo to mono if necessary by averaging the channels
-        if waveform.shape[0] > 1:
-            waveform = torch.mean(waveform, dim=0, keepdim=True)
+            #waveform = self.random_noise_injection(waveform)
 
         spectrogram = self.spectrogram(waveform)
         if self.debug: intermediates['original_spectrograms'] = spectrogram
@@ -224,11 +221,11 @@ class AudioPreprocessing(nn.Module):
         spectrogram = self.binary_image_creation(spectrogram)
         if self.debug: intermediates['binary_image'] = spectrogram
 
-        spectrogram = self.spot_removal(spectrogram)
-        if self.debug: intermediates['spectrograms_after_spot_removal'] = spectrogram
+        # spectrogram = self.morph_closing(spectrogram)
+        # if self.debug: intermediates['spectrograms_after_morph_closing'] = spectrogram
 
-        spectrogram = self.morph_closing(spectrogram)
-        if self.debug: intermediates['spectrograms_after_morph_closing'] = spectrogram
+        # spectrogram = self.spot_removal(spectrogram)
+        # if self.debug: intermediates['spectrograms_after_spot_removal'] = spectrogram
 
         if not self.debug:
             return spectrogram, {}
@@ -245,66 +242,6 @@ class AudioPreprocessing(nn.Module):
 # El método `get_class_proportions` se utiliza para comprobar que los datasets *train* y *validation* contienen la misma proporción de clases, es decir, están estratíficados.
 
 # %%
-# class BirdSongDataset(Dataset):
-#     def __init__(self, df, audio_dir, class_info, transform=None):
-#         segments = []
-
-#         unique_filenames = df['filename'].unique()  # Only process each audio file once
-#         for unique_filename in unique_filenames:
-#             audio_path = os.path.join(audio_dir, unique_filename)
-#             waveform, sample_rate = torchaudio.load(audio_path)
-#             total_segments = int(math.ceil(waveform.shape[1] / sample_rate))  # Total segments in the audio
-
-#             # Calculate the unique labels for each segment
-#             for idx in range(total_segments):
-#                 start_time, end_time = idx, idx + 1
-#                 labels_in_segment = df[(df['filename'] == unique_filename) &
-#                                        (df['end'] > start_time) &
-#                                        (df['start'] < end_time)]['class'].unique().tolist()
-#                 segments.append({
-#                     'filename': unique_filename,
-#                     'segment_idx': idx,
-#                     'start': start_time,
-#                     'end': end_time,
-#                     'class': ",".join(labels_in_segment)
-#                 })
-
-#         self.segments = pd.DataFrame(segments)
-#         self.audio_dir = audio_dir
-#         self.class_info = class_info
-#         self.transform = transform
-
-#     def __len__(self):
-#         return len(self.segments)
-
-#     def __getitem__(self, idx):
-#         row = self.segments.iloc[idx]
-#         audio_path = os.path.join(self.audio_dir, row['filename'])
-#         waveform, sample_rate = torchaudio.load(audio_path)
-
-#         # Extract 1-second segment
-#         start_sample = int(row['start'] * sample_rate)
-#         end_sample = int(row['end'] * sample_rate)
-#         waveform = waveform[:, start_sample:end_sample]
-
-#         # Padding if needed
-#         if waveform.shape[1] < sample_rate:
-#             num_padding = sample_rate - waveform.shape[1]
-#             waveform = torch.cat([waveform, torch.zeros(1, num_padding)], dim=1)
-
-#         class_names = row['class'].split(",") if row['class'] else []
-#         target = torch.zeros(len(self.class_info))
-#         for class_name in class_names:
-#             target[self.class_info.index(class_name)] = 1.0
-
-#         if self.transform:
-#             waveform = self.transform(waveform)
-
-#         return waveform, target
-
-#     def get_filename(self, idx):
-#         return self.segments.iloc[idx]['filename']
-
 class BirdSongDataset(Dataset):
     def __init__(self, df, audio_dir, class_info, transform=None):
         segments = []
@@ -332,7 +269,6 @@ class BirdSongDataset(Dataset):
         self.segments = pd.DataFrame(segments)
         self.audio_dir = audio_dir
         self.class_info = class_info
-        # Store the transform, but we will not apply it in __getitem__
         self.transform = transform
 
     def __len__(self):
@@ -343,23 +279,14 @@ class BirdSongDataset(Dataset):
         audio_path = os.path.join(self.audio_dir, row['filename'])
         waveform, sample_rate = torchaudio.load(audio_path)
 
-        # Ensure waveform is mono
-        if waveform.shape[0] > 1:
-            waveform = torch.mean(waveform, dim=0, keepdim=True)
-
-        # Resample from 44100 Hz to 16000 Hz if necessary
-        if sample_rate != 16000:
-            resampler = Resample(orig_freq=sample_rate, new_freq=16000)
-            waveform = resampler(waveform)
-
         # Extract 1-second segment
-        start_sample = int(row['start'] * 16000)  # Use the new sample rate here
-        end_sample = int(row['end'] * 16000)      # Use the new sample rate here
+        start_sample = int(row['start'] * sample_rate)
+        end_sample = int(row['end'] * sample_rate)
         waveform = waveform[:, start_sample:end_sample]
 
         # Padding if needed
-        if waveform.shape[1] < 16000:  # Use the new sample rate here
-            num_padding = 16000 - waveform.shape[1]  # Use the new sample rate here
+        if waveform.shape[1] < sample_rate:
+            num_padding = sample_rate - waveform.shape[1]
             waveform = torch.cat([waveform, torch.zeros(1, num_padding)], dim=1)
 
         class_names = row['class'].split(",") if row['class'] else []
@@ -367,10 +294,14 @@ class BirdSongDataset(Dataset):
         for class_name in class_names:
             target[self.class_info.index(class_name)] = 1.0
 
+        if self.transform:
+            waveform = self.transform(waveform)
+
         return waveform, target
 
     def get_filename(self, idx):
         return self.segments.iloc[idx]['filename']
+
 
 train_csv = pd.read_csv(f'{base_path}data/train.csv') # CSV with train audio filenames, and bird class names labels.
 class_info_csv = pd.read_csv(f'{base_path}data/class_info.csv')
@@ -383,7 +314,7 @@ for i, (_, row) in enumerate(train_csv.iterrows()):
     for label in labels:
         y[i, class_names.index(label)] = 1
 
-X_train, y_train, X_val, y_val = iterative_train_test_split(np.array(train_csv), y, test_size=0.2)
+X_train, y_train, X_val, y_val = iterative_train_test_split(np.array(train_csv), y, test_size=0.15)
 
 train_df = pd.DataFrame(X_train, columns=train_csv.columns)
 valid_df = pd.DataFrame(X_val, columns=train_csv.columns)
@@ -398,6 +329,7 @@ valid_transform = nn.Sequential(
 
 train_dataset = BirdSongDataset(train_df, f'{base_path}data/train/', class_names, transform=train_transform)
 valid_dataset = BirdSongDataset(valid_df, f'{base_path}data/train/', class_names, transform=valid_transform)
+
 
 # %%
 def aggregate_predictions(predictions, segments_df):
@@ -424,68 +356,68 @@ predicted_classes = [class_name for idx, class_name in enumerate(class_names) if
 print("Predicted Classes:", predicted_classes)
 
 # %%
-def get_class_proportions(y, class_names):
-    """
-    Calculate the proportion of each class in the given binary matrix y.
-    """
-    proportions = {}
-    total_samples = y.shape[0]
+# def get_class_proportions(y, class_names):
+#     """
+#     Calculate the proportion of each class in the given binary matrix y.
+#     """
+#     proportions = {}
+#     total_samples = y.shape[0]
 
-    for idx, class_name in enumerate(class_names):
-        proportions[class_name] = np.sum(y[:, idx]) / total_samples
+#     for idx, class_name in enumerate(class_names):
+#         proportions[class_name] = np.sum(y[:, idx]) / total_samples
 
-    return proportions
+#     return proportions
 
 
+# if DEBUG:
+#     train_proportions = get_class_proportions(y_train, class_names)
+#     valid_proportions = get_class_proportions(y_val, class_names)
+
+#     print("Class Proportions in Training Dataset:")
+#     for class_name, proportion in train_proportions.items():
+#         print(f"{class_name}: {proportion * 100:.2f}%")
+
+#     print("\nClass Proportions in Validation Dataset:")
+#     for class_name, proportion in valid_proportions.items():
+#         print(f"{class_name}: {proportion * 100:.2f}%")
+
+#     # Comparing the differences in proportions
+#     print("\nDifferences in Proportions (Training - Validation):")
+#     for class_name in class_names:
+#         difference = train_proportions[class_name] - valid_proportions[class_name]
+#         print(f"{class_name}: {difference * 100:.2f}%")
+
+
+# %%
 if DEBUG:
-    train_proportions = get_class_proportions(y_train, class_names)
-    valid_proportions = get_class_proportions(y_val, class_names)
+    print(f"Number of elements: {len(valid_dataset)}")
+    sample, target = valid_dataset[90]
+    processed_sample, intermediates = sample
 
-    print("Class Proportions in Training Dataset:")
-    for class_name, proportion in train_proportions.items():
-        print(f"{class_name}: {proportion * 100:.2f}%")
+    print(processed_sample.shape)
+    num_positive_labels = target.sum().item()
+    print(target)
+    print(f"Number of positive labels: {num_positive_labels}")
 
-    print("\nClass Proportions in Validation Dataset:")
-    for class_name, proportion in valid_proportions.items():
-        print(f"{class_name}: {proportion * 100:.2f}%")
+    predicted_classes = [class_name for idx, class_name in enumerate(class_names) if target[idx] == 1.0]
+    print("Predicted Classes:", predicted_classes)
 
-    # Comparing the differences in proportions
-    print("\nDifferences in Proportions (Training - Validation):")
-    for class_name in class_names:
-        difference = train_proportions[class_name] - valid_proportions[class_name]
-        print(f"{class_name}: {difference * 100:.2f}%")
-
+    visualize_intermediates(intermediates)
 
 # %%
-# if DEBUG:
-#     print(f"Number of elements: {len(valid_dataset)}")
-#     sample, target = valid_dataset[90]
-#     processed_sample, intermediates = sample
+if DEBUG:
+    print(f"Number of elements: {len(train_dataset)}")
+    sample, target = train_dataset[30]
+    processed_sample, intermediates = sample
 
-#     print(processed_sample.shape)
-#     num_positive_labels = target.sum().item()
-#     print(target)
-#     print(f"Number of positive labels: {num_positive_labels}")
+    print(processed_sample.shape)
+    num_positive_labels = target.sum().item()
+    print(target)
+    print(f"Number of positive labels: {num_positive_labels}")
 
-#     predicted_classes = [class_name for idx, class_name in enumerate(class_names) if target[idx] == 1.0]
-#     print("Predicted Classes:", predicted_classes)
-
-#     visualize_intermediates(intermediates)
-
-# %%
-# if DEBUG:
-#     print(f"Number of elements: {len(train_dataset)}")
-#     sample, target = train_dataset[30]
-#     processed_sample, intermediates = sample
-
-#     print(processed_sample.shape)
-#     num_positive_labels = target.sum().item()
-#     print(target)
-#     print(f"Number of positive labels: {num_positive_labels}")
-
-#     predicted_classes = [class_name for idx, class_name in enumerate(class_names) if target[idx] == 1.0]
-#     print("Predicted Classes:", predicted_classes)
-#     visualize_intermediates(intermediates)
+    predicted_classes = [class_name for idx, class_name in enumerate(class_names) if target[idx] == 1.0]
+    print("Predicted Classes:", predicted_classes)
+    visualize_intermediates(intermediates)
 
 # %% [markdown]
 # **Calcular la longitud máxima de las formas de onda**
@@ -517,7 +449,7 @@ def collate_fn(batch):
         targets = torch.stack(targets)
         return waveforms_or_spectrograms, targets
 
-BATCH_SIZE=6
+BATCH_SIZE=128
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
 valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
@@ -550,49 +482,54 @@ valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, c
 # Finalmente, tan sólo se utiliza fine-tuning. Los resultados no cambiaban excesivamente.
 
 # %%
-# class ResNetMultilabel(nn.Module):
-#     def __init__(self, num_classes, layers_to_unfreeze=None):
-#         super(ResNetMultilabel, self).__init__()
+dropout_level = 0.2
 
-#         # Initialize the pre-trained model
-#         self.resnet = models.resnet18(pretrained=True)
+class ResNetMultilabel(nn.Module):
+    def __init__(self, num_classes, layers_to_unfreeze=None):
+        super(ResNetMultilabel, self).__init__()
 
-#         # Replace the initial conv layer to handle grayscale images
-#         self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        # Initialize the pre-trained model
+        self.resnet = models.resnet101(pretrained=True)
 
-#         # Dropout for regularization
-#         # self.dropout = nn.Dropout(0.2)
+        # Replace the initial conv layer to handle grayscale images
+        self.resnet.conv1 = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False),
+            nn.BatchNorm2d(64)
+        )
 
-#         # Modify the final layer to match the number of classes
-#         fc_input_size = self.resnet.fc.in_features
-#         self.resnet.fc = nn.Sequential(
-#             nn.Dropout(0.3),
-#             nn.Linear(fc_input_size, 512),
-#             nn.ReLU(),
-#             nn.Dropout(0.3),
-#             nn.Linear(512, num_classes),
-#             nn.Sigmoid()
-#         )
+        # Dropout for regularization
+        # self.dropout = nn.Dropout(0.2)
 
-#         # Unfreeze selected layers for fine-tuning
-#         for name, child in self.resnet.named_children():
-#             if layers_to_unfreeze == "all" or name in layers_to_unfreeze:
-#                 for _, params in child.named_parameters():
-#                     params.requires_grad = True
-#             else:
-#                 for _, params in child.named_parameters():
-#                     params.requires_grad = False
+        # Modify the final layer to match the number of classes
+        fc_input_size = self.resnet.fc.in_features
+        self.resnet.fc = nn.Sequential(
+            nn.Dropout(dropout_level),
+            nn.Linear(fc_input_size, 512),
+            nn.ReLU(),
+            nn.Dropout(dropout_level),
+            nn.Linear(512, num_classes),
+            nn.Sigmoid()
+        )
 
-#     def forward(self, x):
-#         return self.resnet(x)
+        # Unfreeze selected layers for fine-tuning
+        for name, child in self.resnet.named_children():
+            if layers_to_unfreeze == "all" or name in layers_to_unfreeze:
+                for _, params in child.named_parameters():
+                    params.requires_grad = True
+            else:
+                for _, params in child.named_parameters():
+                    params.requires_grad = False
+
+    def forward(self, x):
+        return self.resnet(x)
 
 # %%
-# # Set up the device
-# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# print(f"Using: {device}")
+# Set up the device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using: {device}")
 
-# # Initialize the model
-# model = ResNetMultilabel(num_classes=len(class_names), layers_to_unfreeze="all").to(device)
+# Initialize the model
+model = ResNetMultilabel(num_classes=len(class_names), layers_to_unfreeze="all").to(device)
 
 # %% [markdown]
 # ## Entrenamiento
@@ -613,47 +550,21 @@ valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, c
 # Esto es importante porque las salidas del modelo son valores continuos entre 0 y 1, que representan la confianza del modelo en que esa etiqueta es positiva, y es necesario decidir un umbral (`threshold`) para convertir estas salidas continuas en etiquetas binarias definitivas.
 
 # %%
-from transformers import AutoFeatureExtractor, ASTForAudioClassification
-import torch
-
-# Initialize feature extractor and model
-feature_extractor = AutoFeatureExtractor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
-model = ASTForAudioClassification.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
-
-# Assuming class_names is defined somewhere in your code
-model.classifier.dense = torch.nn.Linear(model.config.hidden_size, len(class_names))
-model.num_labels = len(class_names)
-
-# Move model to GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-
-# Debugging information
-print(f"Using device: {device}")
-if device.type == 'cuda':
-    print(f"GPU Name: {torch.cuda.get_device_name(0)}")
-    print(f"GPU Memory Allocated: {torch.cuda.memory_allocated(0)}")
-    print(f"GPU Memory Cached: {torch.cuda.memory_cached(0)}")
-else:
-    print("No GPU available, using CPU.")
-
-# Additional system info
-print(f"Torch version: {torch.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-print(f"Number of GPUs: {torch.cuda.device_count()}")
-
-# Note: Uncomment and modify the lines related to 'class_names' based on your specific use case.
-
-
-# %%
-total_epochs = 10
+total_epochs = 50
 
 train_losses = []
 val_losses = []
 
-criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.001)
-scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2)
+# Define the criterion with class weights if your dataset is imbalanced
+# criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights)
+criterion = nn.BCELoss()
+
+# Optimizer with weight decay for regularization
+learning_rate = 0.0001
+optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.001)
+
+# Learning rate scheduler
+scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2, verbose=True)
 
 best_val_loss = float('inf')
 epochs_no_improve = 0
@@ -661,77 +572,76 @@ n_epochs_stop = 20
 early_stop = False
 thresholds = np.arange(0.1, 1, 0.1)
 
-# Your training loop with modifications for the AST model
+wandb.init(
+    project="BirdNet",
+    name="Minimal preprocessing with augmentation",
+
+
+    config={
+    "learning_rate": learning_rate,
+    "architecture": "resnet",
+    "depth": 101,
+    "dataset": "NIPS4Bplus",
+    "epochs": total_epochs,
+    "batch_size": BATCH_SIZE,
+    "preprocessing": "minimal",
+    "dropout": dropout_level,
+    "augmentation": "yes"
+    }
+)
+
 for epoch in range(total_epochs):
+
+    # Training
     model.train()
     running_train_loss = 0.0
-    train_labels = []
-    train_preds = []
-
+    all_train_preds = []
+    all_train_labels = []
     for inputs, labels in train_loader:
-        # Make sure inputs are single channel
-        if inputs.ndim == 3 and inputs.size(1) > 1:
-            print(f"Input has multiple channels, shape: {inputs.shape}")
-            inputs = torch.mean(inputs, dim=1, keepdim=True)
-        elif inputs.ndim == 2:
-            inputs = inputs.unsqueeze(1)  # Add channel dimension
-
-        # Now inputs should be of shape [batch, 1, time]
-        #print(f"Shape before feature extractor: {inputs.shape}")
-
-        # Process each waveform through the feature extractor
-        inputs = feature_extractor(inputs.squeeze(1).numpy(), sampling_rate=16000, return_tensors="pt", padding=True)
-        inputs = inputs.to(device)
-        labels = labels.to(device)
+        inputs, labels = inputs.to(device), labels.to(device)
 
         optimizer.zero_grad()
 
-        # Forward pass
-        outputs = model(**inputs)
-        logits = outputs.logits
-
-        # Compute loss, no need to apply sigmoid since BCEWithLogitsLoss does that internally
-        loss = criterion(logits, labels.float())
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
         running_train_loss += loss.item()
 
-        # Store predictions and labels for F1 calculation
-        train_preds.extend(torch.sigmoid(logits).detach().cpu().numpy())
-        train_labels.extend(labels.cpu().numpy())
+        all_train_preds.extend(outputs.sigmoid().detach().cpu().numpy())  # Sigmoid activation
+        all_train_labels.extend(labels.cpu().numpy())
 
     train_loss = running_train_loss / len(train_loader)
 
-    # Your validation loop remains the same, with changes for feature extraction and predictions handling
+    # Validation
     model.eval()
     running_val_loss = 0.0
-    val_labels = []
-    val_preds = []
-
+    all_preds = []
+    all_labels = []
     with torch.no_grad():
         for inputs, labels in valid_loader:
-            # Process through feature extractor and to device
-            inputs = feature_extractor(inputs.squeeze(1).numpy(), sampling_rate=16000, return_tensors="pt", padding=True)
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-
-            outputs = model(**inputs)
-            logits = outputs.logits
-
-            loss = criterion(logits, labels.float())
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
             running_val_loss += loss.item()
 
-            val_preds.extend(torch.sigmoid(logits).detach().cpu().numpy())
-            val_labels.extend(labels.cpu().numpy())
+            all_preds.extend(outputs.sigmoid().cpu().numpy())  # Sigmoid activation
+            all_labels.extend(labels.cpu().numpy())
 
     val_loss = running_val_loss / len(valid_loader)
 
-    # Calculate F1 scores without manual thresholding
-    train_f1 = f1_score(np.array(train_labels), np.array(train_preds) > 0.1, average='samples', zero_division=1)
-    val_f1 = f1_score(np.array(val_labels), np.array(val_preds) > 0.1, average='samples', zero_division=1)
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
 
-    print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Train F1: {train_f1:.4f}, Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}")
+    # F1 score calculations
+    val_f1_scores = [f1_score(all_labels, np.array(all_preds) > t, average='samples', zero_division=1) for t in thresholds]
+    best_threshold_index_val = np.argmax(val_f1_scores)
+    best_threshold_val = thresholds[best_threshold_index_val]
+    validation_f1 = val_f1_scores[best_threshold_index_val]
+    train_best_f1 = f1_score(all_train_labels, np.array(all_train_preds) > best_threshold_val, average='samples', zero_division=1)
+
+    print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Training F1: {train_best_f1:.4f}, Validation Loss: {val_loss:.4f}, Validation F1: {validation_f1:.4f} using threshold {best_threshold_val:.2f}")
 
     # Checkpointing
     if val_loss < best_val_loss:
@@ -747,115 +657,17 @@ for epoch in range(total_epochs):
         early_stop = True
         break
 
-    # Adjusting learning rate
-    scheduler.step(val_loss)
+    # Adjust learning rate
+    scheduler.step(val_loss)  # pass the actual validation loss here
+
+    wandb.log({"Train Loss": train_loss, "Train F1": train_best_f1, "Validation Loss": val_loss, "Validation F1": validation_f1})
 
 if early_stop:
     print("Stopped training. Loading best model weights!")
     model.load_state_dict(torch.load('best_model.pth'))
 
 print('Finished Training')
-
-# %%
-# total_epochs = 30
-
-# train_losses = []
-# val_losses = []
-
-# criterion = nn.BCELoss()
-# optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.001)
-# #optimizer = optim.Adam(model.parameters(), lr=0.001)
-# scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2)
-
-# best_val_loss = float('inf')
-# epochs_no_improve = 0
-# n_epochs_stop = 20
-# early_stop = False
-# thresholds = np.arange(0.1, 1, 0.1)
-
-# for epoch in range(total_epochs):
-
-#     # Training
-#     model.train()
-#     running_train_loss = 0.0
-#     all_train_preds = []
-#     all_train_labels = []
-#     for i, (inputs, labels) in enumerate(train_loader):
-#         inputs, labels = inputs.to(device), labels.to(device)
-
-#         optimizer.zero_grad()
-
-#         outputs = model(inputs)
-#         loss = criterion(outputs, labels)
-#         loss.backward()
-#         optimizer.step()
-
-#         running_train_loss += loss.item()
-
-#         # Store training predictions and true labels
-#         all_train_preds.extend(outputs.detach().cpu().numpy().tolist())
-#         all_train_labels.extend(labels.cpu().numpy().tolist())
-
-#     train_loss = running_train_loss / len(train_loader)
-
-#     # Validation
-#     model.eval()
-#     running_val_loss = 0.0
-#     all_preds = []
-#     all_labels = []
-#     with torch.no_grad():
-#         for inputs, labels in valid_loader:
-#             inputs, labels = inputs.to(device), labels.to(device)
-#             outputs = model(inputs)
-#             loss = criterion(outputs, labels)
-#             running_val_loss += loss.item()
-#             # Store predictions and true labels
-#             all_preds.extend(outputs.cpu().numpy().tolist())
-#             all_labels.extend(labels.cpu().numpy().tolist())
-
-#     val_loss = running_val_loss / len(valid_loader)
-
-#     # Append losses to the lists
-#     train_losses.append(train_loss)
-#     val_losses.append(val_loss)
-
-#     # Calculate validation F1 scores over different thresholds
-#     val_f1_scores = []
-#     for threshold in thresholds:
-#         val_f1_scores.append(f1_score(all_labels, np.array(all_preds) > threshold, average='samples', zero_division=1))
-
-#     # Get the best F1 score and corresponding threshold from the validation data
-#     best_threshold_index_val = np.argmax(val_f1_scores)
-#     best_threshold_val = thresholds[best_threshold_index_val]
-#     validation_f1 = val_f1_scores[best_threshold_index_val]
-
-#     # Calculate training F1 score using the best_threshold_val
-#     train_best_f1 = f1_score(all_train_labels, np.array(all_train_preds) > best_threshold_val, average='samples', zero_division=1)
-
-#     print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Training F1: {train_best_f1:.4f}, Validation Loss: {val_loss:.4f}, Validation F1: {validation_f1:.4f} using threshold {best_threshold_val:.2f}")
-
-#     # Checkpointing
-#     if val_loss < best_val_loss:
-#         best_val_loss = val_loss
-#         epochs_no_improve = 0
-#         torch.save(model.state_dict(), 'best_model.pth')
-#     else:
-#         epochs_no_improve += 1
-
-#     # Early stopping
-#     if epochs_no_improve == n_epochs_stop:
-#         print('Early stopping!')
-#         early_stop = True
-#         break
-
-#     # Adjusting learning rate
-#     scheduler.step(-val_loss)
-
-# if early_stop:
-#     print("Stopped training. Loading best model weights!")
-#     model.load_state_dict(torch.load('best_model.pth'))
-
-# print('Finished Training')
+wandb.finish()
 
 # %%
 plt.figure(figsize=(10, 5))
@@ -883,7 +695,6 @@ print('Finished Training')
 # Las predicciones se convierten en un DataFrame de Pandas y se preparan los datos en el formato esperado, y por último se guarda el DataFrame en un archivo CSV.
 
 # %%
-best_threshold_val = 0.1
 print(f"Best threshold: {best_threshold_val}")
 
 # %%

@@ -1,0 +1,31 @@
+
+Epoch 1, Train Loss: 0.4593, Training F1: 0.3822, Validation Loss: 0.1647, Validation F1: 0.4316 using threshold 0.60
+Epoch 2, Train Loss: 0.0820, Training F1: 0.3242, Validation Loss: 0.0419, Validation F1: 0.4284 using threshold 0.60
+Epoch 3, Train Loss: 0.0591, Training F1: 0.2831, Validation Loss: 0.0482, Validation F1: 0.4284 using threshold 0.60
+Epoch 4, Train Loss: 0.0574, Training F1: 0.2800, Validation Loss: 0.0476, Validation F1: 0.4284 using threshold 0.60
+Epoch 5, Train Loss: 0.0565, Training F1: 0.2827, Validation Loss: 0.0478, Validation F1: 0.4284 using threshold 0.60
+Epoch 00005: reducing learning rate of group 0 to 5.0000e-05.
+Epoch 6, Train Loss: 0.0553, Training F1: 0.2812, Validation Loss: 0.0418, Validation F1: 0.4284 using threshold 0.60
+Epoch 7, Train Loss: 0.0548, Training F1: 0.2800, Validation Loss: 0.0411, Validation F1: 0.4284 using threshold 0.60
+Epoch 8, Train Loss: 0.0540, Training F1: 0.2764, Validation Loss: 0.0462, Validation F1: 0.4519 using threshold 0.60
+Epoch 9, Train Loss: 0.0536, Training F1: 0.2852, Validation Loss: 0.0414, Validation F1: 0.4284 using threshold 0.60
+Epoch 10, Train Loss: 0.0528, Training F1: 0.3014, Validation Loss: 0.0527, Validation F1: 0.4487 using threshold 0.60
+Epoch 00010: reducing learning rate of group 0 to 2.5000e-05.
+Epoch 11, Train Loss: 0.0516, Training F1: 0.2953, Validation Loss: 0.0403, Validation F1: 0.4284 using threshold 0.60
+Epoch 12, Train Loss: 0.0516, Training F1: 0.2941, Validation Loss: 0.0406, Validation F1: 0.4284 using threshold 0.60
+Epoch 13, Train Loss: 0.0505, Training F1: 0.3130, Validation Loss: 0.0410, Validation F1: 0.4284 using threshold 0.60
+Epoch 14, Train Loss: 0.0499, Training F1: 0.3157, Validation Loss: 0.0403, Validation F1: 0.4284 using threshold 0.60
+Epoch 15, Train Loss: 0.0497, Training F1: 0.3208, Validation Loss: 0.0401, Validation F1: 0.4284 using threshold 0.60
+Epoch 16, Train Loss: 0.0491, Training F1: 0.3204, Validation Loss: 0.0402, Validation F1: 0.4284 using threshold 0.60
+Epoch 17, Train Loss: 0.0484, Training F1: 0.3272, Validation Loss: 0.0397, Validation F1: 0.4284 using threshold 0.60
+Epoch 18, Train Loss: 0.0478, Training F1: 0.3346, Validation Loss: 0.0401, Validation F1: 0.4284 using threshold 0.60
+Epoch 19, Train Loss: 0.0469, Training F1: 0.3293, Validation Loss: 0.0405, Validation F1: 0.4284 using threshold 0.60
+Epoch 20, Train Loss: 0.0467, Training F1: 0.3375, Validation Loss: 0.0404, Validation F1: 0.4302 using threshold 0.60
+Epoch 00020: reducing learning rate of group 0 to 1.2500e-05.
+Epoch 21, Train Loss: 0.0459, Training F1: 0.3355, Validation Loss: 0.0404, Validation F1: 0.4302 using threshold 0.60
+Epoch 22, Train Loss: 0.0451, Training F1: 0.3626, Validation Loss: 0.0421, Validation F1: 0.4302 using threshold 0.60
+Epoch 23, Train Loss: 0.0447, Training F1: 0.3477, Validation Loss: 0.0416, Validation F1: 0.4302 using threshold 0.60
+Epoch 00023: reducing learning rate of group 0 to 6.2500e-06.
+Epoch 24, Train Loss: 0.0437, Training F1: 0.3640, Validation Loss: 0.0407, Validation F1: 0.4302 using threshold 0.60
+Epoch 25, Train Loss: 0.0438, Training F1: 0.3627, Validation Loss: 0.0414, Validation F1: 0.4302 using threshold 0.60
+Epoch 26, Train Loss: 0.0436, Training F1: 0.3648, Validation Loss: 0.0420, Validation F1: 0.4302 using threshold 0.60
