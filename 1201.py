@@ -147,12 +147,6 @@ class AudioPreprocessing(nn.Module):
         mask = (spectrogram > freq_thresholds) & (spectrogram > time_thresholds)
         return mask.float()
 
-    ## fastNlMeansDenoising works better but is too much cpu expensive and it bottlenecks the GPU on training
-    # def spot_removal(self, spectrogram):
-    #     img = spectrogram.squeeze(0).cpu().numpy()
-    #     img = cv2.fastNlMeansDenoising(img.astype(np.uint8),None,31,7,21)
-    #     return torch.tensor(img, device=spectrogram.device).float().unsqueeze(0)
-
     def spot_removal(self, spectrogram, threshold=0.5):
         # Threshold the spectrogram to get a binary mask
         binary_mask = (spectrogram > threshold).float()
@@ -174,11 +168,11 @@ class AudioPreprocessing(nn.Module):
 
         return denoised_spectrogram
 
-    def morph_closing(self, spectrogram):
-        img = spectrogram.squeeze(0).cpu().numpy()
-        kernel = np.ones((3, 3), np.uint8)
-        img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
-        return torch.tensor(img, device=spectrogram.device).float().unsqueeze(0)
+    # def morph_closing(self, spectrogram):
+    #     img = spectrogram.squeeze(0).cpu().numpy()
+    #     kernel = np.ones((3, 3), np.uint8)
+    #     img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
+    #     return torch.tensor(img, device=spectrogram.device).float().unsqueeze(0)
 
     def random_time_shift(self, waveform, max_shift_sec=0.2):
         """ Randomly shifts the waveform in the time domain """
@@ -196,11 +190,6 @@ class AudioPreprocessing(nn.Module):
         gain = random.uniform(min_gain, max_gain)
         return waveform * gain
 
-    def random_noise_injection(self, waveform, noise_level=0.005):
-        """ Adds random noise to the waveform """
-        noise = torch.randn_like(waveform) * noise_level
-        return waveform + noise
-
     def forward(self, waveform):
         intermediates = {}
 
@@ -209,14 +198,13 @@ class AudioPreprocessing(nn.Module):
             waveform = self.random_time_shift(waveform)
             waveform = self.random_pitch_shift(waveform)
             waveform = self.random_volume_gain(waveform)
-            #waveform = self.random_noise_injection(waveform)
 
         spectrogram = self.spectrogram(waveform)
         if self.debug: intermediates['original_spectrograms'] = spectrogram
 
         spectrogram = self.normalize(spectrogram)
-        # spectrogram = self.median_blurring(spectrogram)
-        # if self.debug: intermediates['spectrograms_after_median_blurring'] = spectrogram
+        spectrogram = self.median_blurring(spectrogram)
+        if self.debug: intermediates['spectrograms_after_median_blurring'] = spectrogram
 
         spectrogram = self.binary_image_creation(spectrogram)
         if self.debug: intermediates['binary_image'] = spectrogram
@@ -314,7 +302,7 @@ for i, (_, row) in enumerate(train_csv.iterrows()):
     for label in labels:
         y[i, class_names.index(label)] = 1
 
-X_train, y_train, X_val, y_val = iterative_train_test_split(np.array(train_csv), y, test_size=0.15)
+X_train, y_train, X_val, y_val = iterative_train_test_split(np.array(train_csv), y, test_size=0.1)
 
 train_df = pd.DataFrame(X_train, columns=train_csv.columns)
 valid_df = pd.DataFrame(X_val, columns=train_csv.columns)
@@ -354,39 +342,6 @@ print(f"Label: {label}")
 # Convert tensor label back to class names to check
 predicted_classes = [class_name for idx, class_name in enumerate(class_names) if label[idx] == 1.0]
 print("Predicted Classes:", predicted_classes)
-
-# %%
-# def get_class_proportions(y, class_names):
-#     """
-#     Calculate the proportion of each class in the given binary matrix y.
-#     """
-#     proportions = {}
-#     total_samples = y.shape[0]
-
-#     for idx, class_name in enumerate(class_names):
-#         proportions[class_name] = np.sum(y[:, idx]) / total_samples
-
-#     return proportions
-
-
-# if DEBUG:
-#     train_proportions = get_class_proportions(y_train, class_names)
-#     valid_proportions = get_class_proportions(y_val, class_names)
-
-#     print("Class Proportions in Training Dataset:")
-#     for class_name, proportion in train_proportions.items():
-#         print(f"{class_name}: {proportion * 100:.2f}%")
-
-#     print("\nClass Proportions in Validation Dataset:")
-#     for class_name, proportion in valid_proportions.items():
-#         print(f"{class_name}: {proportion * 100:.2f}%")
-
-#     # Comparing the differences in proportions
-#     print("\nDifferences in Proportions (Training - Validation):")
-#     for class_name in class_names:
-#         difference = train_proportions[class_name] - valid_proportions[class_name]
-#         print(f"{class_name}: {difference * 100:.2f}%")
-
 
 # %%
 if DEBUG:
@@ -482,6 +437,8 @@ valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, c
 # Finalmente, tan sólo se utiliza fine-tuning. Los resultados no cambiaban excesivamente.
 
 # %%
+dropout_level = 0.25
+
 class ResNetMultilabel(nn.Module):
     def __init__(self, num_classes, layers_to_unfreeze=None):
         super(ResNetMultilabel, self).__init__()
@@ -495,16 +452,13 @@ class ResNetMultilabel(nn.Module):
             nn.BatchNorm2d(64)
         )
 
-        # Dropout for regularization
-        # self.dropout = nn.Dropout(0.2)
-
         # Modify the final layer to match the number of classes
         fc_input_size = self.resnet.fc.in_features
         self.resnet.fc = nn.Sequential(
-            nn.Dropout(0.4),
+            nn.Dropout(dropout_level),
             nn.Linear(fc_input_size, 512),
             nn.ReLU(),
-            nn.Dropout(0.4),
+            nn.Dropout(dropout_level),
             nn.Linear(512, num_classes),
             nn.Sigmoid()
         )
@@ -548,33 +502,31 @@ model = ResNetMultilabel(num_classes=len(class_names), layers_to_unfreeze="all")
 # Esto es importante porque las salidas del modelo son valores continuos entre 0 y 1, que representan la confianza del modelo en que esa etiqueta es positiva, y es necesario decidir un umbral (`threshold`) para convertir estas salidas continuas en etiquetas binarias definitivas.
 
 # %%
-total_epochs = 70
+total_epochs = 50
 
 train_losses = []
 val_losses = []
 
-# Define the criterion with class weights if your dataset is imbalanced
-# criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights)
 criterion = nn.BCELoss()
 
 # Optimizer with weight decay for regularization
 learning_rate = 0.0001
-optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.001)
+weight_decay = 0.001
+optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
 # Learning rate scheduler
 scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2, verbose=True)
 
 best_val_loss = float('inf')
 epochs_no_improve = 0
-n_epochs_stop = 20
+n_epochs_stop = 10
 early_stop = False
 thresholds = np.arange(0.1, 1, 0.1)
 
 wandb.init(
-    # set the wandb project where this run will be logged
     project="BirdNet",
+    name="More dropout",
 
-    # track hyperparameters and run metadata
     config={
     "learning_rate": learning_rate,
     "architecture": "resnet",
@@ -582,7 +534,10 @@ wandb.init(
     "dataset": "NIPS4Bplus",
     "epochs": total_epochs,
     "batch_size": BATCH_SIZE,
-    "preprocessing": "minimal"
+    "preprocessing": "minimal",
+    "dropout": dropout_level,
+    "weight decay": weight_decay,
+    "augmentation": "yes"
     }
 )
 
