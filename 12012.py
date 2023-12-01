@@ -146,6 +146,25 @@ class AudioPreprocessing(nn.Module):
         # Create a mask based on the adaptive thresholding
         mask = (spectrogram > freq_thresholds) & (spectrogram > time_thresholds)
         return mask.float()
+    
+    @staticmethod
+    def overlay_and_mix(waveform1, waveform2, interval1, interval2, sample_rate):
+        """
+        Overlays and mixes two waveforms based on the bird sound intervals.
+        """
+        start_sample1 = int(interval1[0] * sample_rate)
+        end_sample1 = int(interval1[1] * sample_rate)
+        start_sample2 = int(interval2[0] * sample_rate)
+        end_sample2 = int(interval2[1] * sample_rate)
+
+        # Overlay waveform2 on waveform1
+        mixed_waveform = waveform1.clone()
+        mixed_waveform[:, start_sample1:end_sample1] += waveform2[:, start_sample2:end_sample2]
+
+        # Normalize to prevent clipping
+        mixed_waveform = torch.clamp(mixed_waveform, min=-1.0, max=1.0)
+
+        return mixed_waveform
 
     # def spot_removal(self, spectrogram, threshold=0.5):
     #     # Threshold the spectrogram to get a binary mask
@@ -190,8 +209,14 @@ class AudioPreprocessing(nn.Module):
         gain = random.uniform(min_gain, max_gain)
         return waveform * gain
 
-    def forward(self, waveform):
+    def forward(self, waveform, overlay_waveform=None, overlay_interval=None):
         intermediates = {}
+        
+        # Overlay and mix augmentation
+        if self.augment and overlay_waveform is not None and overlay_interval is not None:
+            current_interval = [0, 1]  # Assuming the current segment is 1 second
+            waveform = self.overlay_and_mix(waveform, overlay_waveform, current_interval, overlay_interval, self.sample_rate)
+
 
         # Data augmentation
         if self.augment:
@@ -261,8 +286,13 @@ class BirdSongDataset(Dataset):
 
     def __len__(self):
         return len(self.segments)
+    
+    def get_random_segment(self):
+        random_idx = random.randint(0, len(self.segments) - 1)
+        return self.__getitem__(random_idx, include_interval=True)
 
-    def __getitem__(self, idx):
+
+    def __getitem__(self, idx, include_interval=False):
         row = self.segments.iloc[idx]
         audio_path = os.path.join(self.audio_dir, row['filename'])
         waveform, sample_rate = torchaudio.load(audio_path)
@@ -285,7 +315,13 @@ class BirdSongDataset(Dataset):
         if self.transform:
             waveform = self.transform(waveform)
 
-        return waveform, target
+        # Include interval information if required
+        if include_interval:
+            segment_info = self.segments.iloc[idx]
+            interval = [segment_info['start'], segment_info['end']]
+            return waveform, target, interval
+        else:
+            return waveform, target
 
     def get_filename(self, idx):
         return self.segments.iloc[idx]['filename']
@@ -396,7 +432,14 @@ def collate_fn(batch):
         # This handles the scenario where DEBUG is False and intermediates dictionary is returned
         waveforms_or_spectrograms = torch.stack(waveforms_or_spectrograms)
         return waveforms_or_spectrograms  # Note: Here we return only the waveforms as there are no target labels
-
+    
+    # Check for the scenario where intervals are included
+    elif isinstance(batch[0][1], tuple) and len(batch[0][1]) == 3:
+        waveforms, targets, intervals = zip(*[(wf, target, interval) for wf, (target, _, interval) in batch])
+        waveforms = torch.stack(waveforms)
+        targets = torch.stack(targets)
+        return waveforms, targets, intervals
+    
     else:
         # This handles the Training or validation batch scenario
         waveforms_or_spectrograms = torch.stack(waveforms_or_spectrograms)
@@ -514,6 +557,9 @@ learning_rate = 0.0001
 weight_decay = 0.001
 optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+overlay_augmentation = True
+sample_rate = 44100
+
 # Learning rate scheduler
 scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2, verbose=True)
 
@@ -537,7 +583,8 @@ wandb.init(
     "preprocessing": "minimal",
     "dropout": dropout_level,
     "weight decay": weight_decay,
-    "augmentation": "yes"
+    "augmentation": "yes",
+    "overlay_augmentation": overlay_augmentation
     }
 )
 
@@ -550,6 +597,14 @@ for epoch in range(total_epochs):
     all_train_labels = []
     for inputs, labels in train_loader:
         inputs, labels = inputs.to(device), labels.to(device)
+        
+        # Apply overlay and mix augmentation
+        if overlay_augmentation:  # Assuming a flag to toggle this augmentation
+            overlay_inputs, _, overlay_intervals = train_dataset.get_random_segment()
+            overlay_inputs = overlay_inputs.to(device)
+            for i in range(len(inputs)):
+                inputs[i] = AudioPreprocessing.overlay_and_mix(inputs[i], overlay_inputs[i], [0, 1], overlay_intervals[i], sample_rate)
+
 
         optimizer.zero_grad()
 
@@ -603,19 +658,19 @@ for epoch in range(total_epochs):
         epochs_no_improve += 1
 
     # Early stopping
-    # if epochs_no_improve == n_epochs_stop:
-    #     print('Early stopping!')
-    #     early_stop = True
-    #     break
+    if epochs_no_improve == n_epochs_stop:
+        print('Early stopping!')
+        early_stop = True
+        break
 
     # Adjust learning rate
     scheduler.step(val_loss)  # pass the actual validation loss here
 
     wandb.log({"Train Loss": train_loss, "Train F1": train_best_f1, "Validation Loss": val_loss, "Validation F1": validation_f1})
 
-# if early_stop:
-#     print("Stopped training. Loading best model weights!")
-#     model.load_state_dict(torch.load('best_model.pth'))
+if early_stop:
+    print("Stopped training. Loading best model weights!")
+    model.load_state_dict(torch.load('best_model.pth'))
 
 print('Finished Training')
 wandb.finish()
